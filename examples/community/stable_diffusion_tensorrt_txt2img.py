@@ -120,9 +120,12 @@ class Engine:
                 assert len(dims) == 3
                 p.add(name, min=dims[0], opt=dims[1], max=dims[2])
 
-        config_kwargs = {}
+        config_kwargs = {
+            "preview_features": [
+                trt.PreviewFeature.DISABLE_EXTERNAL_TACTIC_SOURCES_FOR_CORE_0805
+            ]
+        }
 
-        config_kwargs["preview_features"] = [trt.PreviewFeature.DISABLE_EXTERNAL_TACTIC_SOURCES_FOR_CORE_0805]
         if enable_preview:
             # Faster dynamic shapes made optional since it increases engine build time.
             config_kwargs["preview_features"].append(trt.PreviewFeature.FASTER_DYNAMIC_SHAPES_0805)
@@ -167,11 +170,12 @@ class Engine:
             assert isinstance(buf, cuda.DeviceView)
             device_buffers[name] = buf
         bindings = [0] * start_binding + [buf.ptr for buf in device_buffers.values()]
-        noerror = self.context.execute_async_v2(bindings=bindings, stream_handle=stream.ptr)
-        if not noerror:
+        if noerror := self.context.execute_async_v2(
+            bindings=bindings, stream_handle=stream.ptr
+        ):
+            return self.tensors
+        else:
             raise ValueError("ERROR: inference failed.")
-
-        return self.tensors
 
 
 class Optimizer:
@@ -250,8 +254,7 @@ class BaseModel:
         opt.cleanup()
         opt.fold_constants()
         opt.infer_shapes()
-        onnx_opt_graph = opt.cleanup(return_onnx=True)
-        return onnx_opt_graph
+        return opt.cleanup(return_onnx=True)
 
     def check_dims(self, batch_size, image_height, image_width):
         assert batch_size >= self.min_batch and batch_size <= self.max_batch
@@ -294,7 +297,7 @@ def getOnnxPath(model_name, onnx_dir, opt=True):
 
 
 def getEnginePath(model_name, engine_dir):
-    return os.path.join(engine_dir, model_name + ".plan")
+    return os.path.join(engine_dir, f"{model_name}.plan")
 
 
 def build_engines(
@@ -383,7 +386,7 @@ def build_engines(
         built_engines[model_name] = engine
 
     # Load and activate TensorRT engines
-    for model_name, model_obj in models.items():
+    for model_name in models:
         engine = built_engines[model_name]
         engine.load()
         engine.activate()
@@ -438,8 +441,7 @@ class CLIP(BaseModel):
         opt.fold_constants()
         opt.infer_shapes()
         opt.select_outputs([0], names=["text_embeddings"])  # rename network output
-        opt_onnx_graph = opt.cleanup(return_onnx=True)
-        return opt_onnx_graph
+        return opt.cleanup(return_onnx=True)
 
 
 def make_CLIP(model, device, max_batch_size, embedding_dim, inpaint=False):

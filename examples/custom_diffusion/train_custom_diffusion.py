@@ -135,8 +135,11 @@ def collate_fn(examples, with_prior_preservation):
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
     mask = mask.to(memory_format=torch.contiguous_format).float()
 
-    batch = {"input_ids": input_ids, "pixel_values": pixel_values, "mask": mask.unsqueeze(1)}
-    return batch
+    return {
+        "input_ids": input_ids,
+        "pixel_values": pixel_values,
+        "mask": mask.unsqueeze(1),
+    }
 
 
 class PromptDataset(Dataset):
@@ -150,10 +153,7 @@ class PromptDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, index):
-        example = {}
-        example["prompt"] = self.prompt
-        example["index"] = index
-        return example
+        return {"prompt": self.prompt, "index": index}
 
 
 class CustomDiffusionDataset(Dataset):
@@ -201,7 +201,7 @@ class CustomDiffusionDataset(Dataset):
                     with open(concept["class_prompt"], "r") as f:
                         class_prompt = f.read().splitlines()
 
-                class_img_path = [(x, y) for (x, y) in zip(class_images_path, class_prompt)]
+                class_img_path = list(zip(class_images_path, class_prompt))
                 self.class_images_path.extend(class_img_path[:num_class_images])
 
         random.shuffle(self.instance_images_path)
@@ -245,10 +245,9 @@ class CustomDiffusionDataset(Dataset):
         return instance_image, mask
 
     def __getitem__(self, index):
-        example = {}
         instance_image, instance_prompt = self.instance_images_path[index % self.num_instance_images]
         instance_image = Image.open(instance_image)
-        if not instance_image.mode == "RGB":
+        if instance_image.mode != "RGB":
             instance_image = instance_image.convert("RGB")
         instance_image = self.flip(instance_image)
 
@@ -267,7 +266,9 @@ class CustomDiffusionDataset(Dataset):
         elif random_scale > self.size:
             instance_prompt = np.random.choice(["zoomed in ", "close up "]) + instance_prompt
 
-        example["instance_images"] = torch.from_numpy(instance_image).permute(2, 0, 1)
+        example = {
+            "instance_images": torch.from_numpy(instance_image).permute(2, 0, 1)
+        }
         example["mask"] = torch.from_numpy(mask)
         example["instance_prompt_ids"] = self.tokenizer(
             instance_prompt,
@@ -280,7 +281,7 @@ class CustomDiffusionDataset(Dataset):
         if self.with_prior_preservation:
             class_image, class_prompt = self.class_images_path[index % self.num_class_images]
             class_image = Image.open(class_image)
-            if not class_image.mode == "RGB":
+            if class_image.mode != "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
             example["class_mask"] = torch.ones_like(example["mask"])
@@ -300,8 +301,7 @@ def save_new_embed(text_encoder, modifier_token_id, accelerator, args, output_di
     logger.info("Saving embeddings")
     learned_embeds = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight
     for x, y in zip(modifier_token_id, args.modifier_token):
-        learned_embeds_dict = {}
-        learned_embeds_dict[y] = learned_embeds[x]
+        learned_embeds_dict = {y: learned_embeds[x]}
         torch.save(learned_embeds_dict, f"{output_dir}/{y}.bin")
 
 
@@ -615,7 +615,7 @@ def parse_args(input_args=None):
         args = parser.parse_args()
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
+    if env_local_rank not in [-1, args.local_rank]:
         args.local_rank = env_local_rank
 
     if args.with_prior_preservation:

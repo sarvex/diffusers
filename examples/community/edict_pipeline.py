@@ -159,9 +159,8 @@ class EDICTPipeline(DiffusionPipeline):
             for j in range(2):
                 k = j ^ 1
 
-                if self.leapfrog_steps:
-                    if i % 2 == 0:
-                        k, j = j, k
+                if self.leapfrog_steps and i % 2 == 0:
+                    k, j = j, k
 
                 model_input = coupled_latents[j]
                 base = coupled_latents[k]
@@ -218,9 +217,8 @@ class EDICTPipeline(DiffusionPipeline):
             for k in range(2):
                 j = k ^ 1
 
-                if self.leapfrog_steps:
-                    if i % 2 == 1:
-                        k, j = j, k
+                if self.leapfrog_steps and i % 2 == 1:
+                    k, j = j, k
 
                 model_input = coupled_latents[j]
                 base = coupled_latents[k]

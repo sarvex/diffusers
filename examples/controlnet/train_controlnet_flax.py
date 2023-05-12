@@ -469,7 +469,7 @@ def parse_args():
     args.output_dir = args.output_dir.replace("{timestamp}", time.strftime("%Y%m%d_%H%M%S"))
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
+    if env_local_rank not in [-1, args.local_rank]:
         args.local_rank = env_local_rank
 
     # Sanity checks
@@ -489,7 +489,6 @@ def parse_args():
 
     if (
         args.validation_image is not None
-        and args.validation_prompt is not None
         and len(args.validation_image) != 1
         and len(args.validation_prompt) != 1
         and len(args.validation_image) != len(args.validation_prompt)
@@ -973,7 +972,7 @@ def main():
         metrics = jax.lax.pmean(metrics, axis_name="batch")
 
         def l2(xs):
-            return jnp.sqrt(sum([jnp.vdot(x, x) for x in jax.tree_util.tree_leaves(xs)]))
+            return jnp.sqrt(sum(jnp.vdot(x, x) for x in jax.tree_util.tree_leaves(xs)))
 
         metrics["l2_grads"] = l2(jax.tree_util.tree_leaves(grad))
 

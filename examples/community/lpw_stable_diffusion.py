@@ -120,7 +120,7 @@ def parse_prompt_attention(text):
     for pos in square_brackets:
         multiply_range(pos, square_bracket_multiplier)
 
-    if len(res) == 0:
+    if not res:
         res = [["", 1.0]]
 
     # merge runs of identical weights
@@ -206,33 +206,32 @@ def get_unweighted_text_embeddings(
     it should be split into chunks and sent to the text encoder individually.
     """
     max_embeddings_multiples = (text_input.shape[1] - 2) // (chunk_length - 2)
-    if max_embeddings_multiples > 1:
-        text_embeddings = []
-        for i in range(max_embeddings_multiples):
-            # extract the i-th chunk
-            text_input_chunk = text_input[:, i * (chunk_length - 2) : (i + 1) * (chunk_length - 2) + 2].clone()
+    if max_embeddings_multiples <= 1:
+        return pipe.text_encoder(text_input)[0]
+    text_embeddings = []
+    for i in range(max_embeddings_multiples):
+        # extract the i-th chunk
+        text_input_chunk = text_input[:, i * (chunk_length - 2) : (i + 1) * (chunk_length - 2) + 2].clone()
 
-            # cover the head and the tail by the starting and the ending tokens
-            text_input_chunk[:, 0] = text_input[0, 0]
-            text_input_chunk[:, -1] = text_input[0, -1]
-            text_embedding = pipe.text_encoder(text_input_chunk)[0]
+        # cover the head and the tail by the starting and the ending tokens
+        text_input_chunk[:, 0] = text_input[0, 0]
+        text_input_chunk[:, -1] = text_input[0, -1]
+        text_embedding = pipe.text_encoder(text_input_chunk)[0]
 
+        if i == 0:
             if no_boseos_middle:
-                if i == 0:
-                    # discard the ending token
-                    text_embedding = text_embedding[:, :-1]
-                elif i == max_embeddings_multiples - 1:
-                    # discard the starting token
-                    text_embedding = text_embedding[:, 1:]
-                else:
-                    # discard both starting and ending tokens
-                    text_embedding = text_embedding[:, 1:-1]
+                # discard the ending token
+                text_embedding = text_embedding[:, :-1]
+        elif i == max_embeddings_multiples - 1:
+            if no_boseos_middle:
+                # discard the starting token
+                text_embedding = text_embedding[:, 1:]
+        elif no_boseos_middle:
+            # discard both starting and ending tokens
+            text_embedding = text_embedding[:, 1:-1]
 
-            text_embeddings.append(text_embedding)
-        text_embeddings = torch.concat(text_embeddings, axis=1)
-    else:
-        text_embeddings = pipe.text_encoder(text_input)[0]
-    return text_embeddings
+        text_embeddings.append(text_embedding)
+    return torch.concat(text_embeddings, axis=1)
 
 
 def get_weighted_text_embeddings(
@@ -294,9 +293,9 @@ def get_weighted_text_embeddings(
             uncond_weights = [[1.0] * len(token) for token in uncond_tokens]
 
     # round up the longest length of tokens to a multiple of (model_max_length - 2)
-    max_length = max([len(token) for token in prompt_tokens])
+    max_length = max(len(token) for token in prompt_tokens)
     if uncond_prompt is not None:
-        max_length = max(max_length, max([len(token) for token in uncond_tokens]))
+        max_length = max(max_length, max(len(token) for token in uncond_tokens))
 
     max_embeddings_multiples = min(
         max_embeddings_multiples,
@@ -389,8 +388,6 @@ def preprocess_mask(mask, batch_size, scale_factor=8):
         mask = np.vstack([mask[None]] * batch_size)
         mask = 1 - mask  # repaint white, keep black
         mask = torch.from_numpy(mask)
-        return mask
-
     else:
         valid_mask_channel_sizes = [1, 3]
         # if mask channel is fourth tensor dimension, permute dimensions to pytorch standard (B, C, H, W)
@@ -406,7 +403,8 @@ def preprocess_mask(mask, batch_size, scale_factor=8):
         h, w = mask.shape[-2:]
         h, w = (x - x % 8 for x in (h, w))  # resize to integer multiple of 8
         mask = torch.nn.functional.interpolate(mask, (h // scale_factor, w // scale_factor))
-        return mask
+
+    return mask
 
 
 class StableDiffusionLongPromptWeightingPipeline(
@@ -622,7 +620,6 @@ class StableDiffusionLongPromptWeightingPipeline(
         self.final_offload_hook = hook
 
     @property
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._execution_device
     def _execution_device(self):
         r"""
         Returns the device on which the pipeline's models will be executed. After calling
@@ -631,14 +628,18 @@ class StableDiffusionLongPromptWeightingPipeline(
         """
         if not hasattr(self.unet, "_hf_hook"):
             return self.device
-        for module in self.unet.modules():
-            if (
-                hasattr(module, "_hf_hook")
-                and hasattr(module._hf_hook, "execution_device")
-                and module._hf_hook.execution_device is not None
-            ):
-                return torch.device(module._hf_hook.execution_device)
-        return self.device
+        return next(
+            (
+                torch.device(module._hf_hook.execution_device)
+                for module in self.unet.modules()
+                if (
+                    hasattr(module, "_hf_hook")
+                    and hasattr(module._hf_hook, "execution_device")
+                    and module._hf_hook.execution_device is not None
+                )
+            ),
+            self.device,
+        )
 
     def _encode_prompt(
         self,
@@ -699,10 +700,10 @@ class StableDiffusionLongPromptWeightingPipeline(
                 uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
                 max_embeddings_multiples=max_embeddings_multiples,
             )
-            if prompt_embeds is None:
-                prompt_embeds = prompt_embeds1
-            if negative_prompt_embeds is None:
-                negative_prompt_embeds = negative_prompt_embeds1
+        if prompt_embeds is None:
+            prompt_embeds = prompt_embeds1
+        if negative_prompt_embeds is None:
+            negative_prompt_embeds = negative_prompt_embeds1
 
         bs_embed, seq_len, _ = prompt_embeds.shape
         # duplicate text embeddings for each generation per prompt, using mps friendly method
@@ -734,8 +735,10 @@ class StableDiffusionLongPromptWeightingPipeline(
         if strength < 0 or strength > 1:
             raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
 
-        if (callback_steps is None) or (
-            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+        if (
+            callback_steps is None
+            or not isinstance(callback_steps, int)
+            or callback_steps <= 0
         ):
             raise ValueError(
                 f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
@@ -760,25 +763,27 @@ class StableDiffusionLongPromptWeightingPipeline(
                 f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
             )
 
-        if prompt_embeds is not None and negative_prompt_embeds is not None:
-            if prompt_embeds.shape != negative_prompt_embeds.shape:
-                raise ValueError(
-                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
-                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
-                    f" {negative_prompt_embeds.shape}."
-                )
+        if (
+            prompt_embeds is not None
+            and negative_prompt_embeds is not None
+            and prompt_embeds.shape != negative_prompt_embeds.shape
+        ):
+            raise ValueError(
+                "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
+                f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
+                f" {negative_prompt_embeds.shape}."
+            )
 
     def get_timesteps(self, num_inference_steps, strength, device, is_text2img):
         if is_text2img:
             return self.scheduler.timesteps.to(device), num_inference_steps
-        else:
-            # get the original timestep using init_timestep
-            init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
+        # get the original timestep using init_timestep
+        init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
 
-            t_start = max(num_inference_steps - init_timestep, 0)
-            timesteps = self.scheduler.timesteps[t_start * self.scheduler.order :]
+        t_start = max(num_inference_steps - init_timestep, 0)
+        timesteps = self.scheduler.timesteps[t_start * self.scheduler.order :]
 
-            return timesteps, num_inference_steps - t_start
+        return timesteps, num_inference_steps - t_start
 
     def run_safety_checker(self, image, device, dtype):
         if self.safety_checker is not None:

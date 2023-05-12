@@ -48,12 +48,11 @@ def parse_args():
         default=0,
         help="cuda_id.",
     )
-    args = parser.parse_args()
-    return args
+    return parser.parse_args()
 
 
 def image_grid(imgs, rows, cols):
-    if not len(imgs) == rows * cols:
+    if len(imgs) != rows * cols:
         raise ValueError("The specified number of rows and columns are not correct.")
 
     w, h = imgs[0].size
@@ -105,8 +104,13 @@ else:
     unet = unet.to(torch.device("cuda", args.cuda_id))
 pipeline = pipeline.to(unet.device)
 grid, images = generate_images(pipeline, prompt=args.caption, num_images_per_prompt=args.images_num, seed=args.seed)
-grid.save(os.path.join(args.pretrained_model_name_or_path, "{}.png".format("_".join(args.caption.split()))))
+grid.save(
+    os.path.join(
+        args.pretrained_model_name_or_path,
+        f'{"_".join(args.caption.split())}.png',
+    )
+)
 dirname = os.path.join(args.pretrained_model_name_or_path, "_".join(args.caption.split()))
 os.makedirs(dirname, exist_ok=True)
 for idx, image in enumerate(images):
-    image.save(os.path.join(dirname, "{}.png".format(idx + 1)))
+    image.save(os.path.join(dirname, f"{idx + 1}.png"))

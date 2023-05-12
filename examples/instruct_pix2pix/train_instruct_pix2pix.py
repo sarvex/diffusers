@@ -348,7 +348,7 @@ def parse_args():
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
+    if env_local_rank not in [-1, args.local_rank]:
         args.local_rank = env_local_rank
 
     # Sanity checks
@@ -864,11 +864,13 @@ def main():
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
 
-                if global_step % args.checkpointing_steps == 0:
-                    if accelerator.is_main_process:
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
+                if (
+                    global_step % args.checkpointing_steps == 0
+                    and accelerator.is_main_process
+                ):
+                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                    accelerator.save_state(save_path)
+                    logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -876,65 +878,64 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-        if accelerator.is_main_process:
-            if (
-                (args.val_image_url is not None)
-                and (args.validation_prompt is not None)
-                and (epoch % args.validation_epochs == 0)
+        if accelerator.is_main_process and (
+            (args.val_image_url is not None)
+            and (args.validation_prompt is not None)
+            and (epoch % args.validation_epochs == 0)
+        ):
+            logger.info(
+                f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
+                f" {args.validation_prompt}."
+            )
+            # create pipeline
+            if args.use_ema:
+                # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+                ema_unet.store(unet.parameters())
+                ema_unet.copy_to(unet.parameters())
+            # The models need unwrapping because for compatibility in distributed training mode.
+            pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                unet=accelerator.unwrap_model(unet),
+                text_encoder=accelerator.unwrap_model(text_encoder),
+                vae=accelerator.unwrap_model(vae),
+                revision=args.revision,
+                torch_dtype=weight_dtype,
+            )
+            pipeline = pipeline.to(accelerator.device)
+            pipeline.set_progress_bar_config(disable=True)
+
+            # run inference
+            original_image = download_image(args.val_image_url)
+            edited_images = []
+            with torch.autocast(
+                str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
             ):
-                logger.info(
-                    f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-                    f" {args.validation_prompt}."
-                )
-                # create pipeline
-                if args.use_ema:
-                    # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                    ema_unet.store(unet.parameters())
-                    ema_unet.copy_to(unet.parameters())
-                # The models need unwrapping because for compatibility in distributed training mode.
-                pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    unet=accelerator.unwrap_model(unet),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    vae=accelerator.unwrap_model(vae),
-                    revision=args.revision,
-                    torch_dtype=weight_dtype,
-                )
-                pipeline = pipeline.to(accelerator.device)
-                pipeline.set_progress_bar_config(disable=True)
+                for _ in range(args.num_validation_images):
+                    edited_images.append(
+                        pipeline(
+                            args.validation_prompt,
+                            image=original_image,
+                            num_inference_steps=20,
+                            image_guidance_scale=1.5,
+                            guidance_scale=7,
+                            generator=generator,
+                        ).images[0]
+                    )
 
-                # run inference
-                original_image = download_image(args.val_image_url)
-                edited_images = []
-                with torch.autocast(
-                    str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
-                ):
-                    for _ in range(args.num_validation_images):
-                        edited_images.append(
-                            pipeline(
-                                args.validation_prompt,
-                                image=original_image,
-                                num_inference_steps=20,
-                                image_guidance_scale=1.5,
-                                guidance_scale=7,
-                                generator=generator,
-                            ).images[0]
+            for tracker in accelerator.trackers:
+                if tracker.name == "wandb":
+                    wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
+                    for edited_image in edited_images:
+                        wandb_table.add_data(
+                            wandb.Image(original_image), wandb.Image(edited_image), args.validation_prompt
                         )
+                    tracker.log({"validation": wandb_table})
+            if args.use_ema:
+                # Switch back to the original UNet parameters.
+                ema_unet.restore(unet.parameters())
 
-                for tracker in accelerator.trackers:
-                    if tracker.name == "wandb":
-                        wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
-                        for edited_image in edited_images:
-                            wandb_table.add_data(
-                                wandb.Image(original_image), wandb.Image(edited_image), args.validation_prompt
-                            )
-                        tracker.log({"validation": wandb_table})
-                if args.use_ema:
-                    # Switch back to the original UNet parameters.
-                    ema_unet.restore(unet.parameters())
-
-                del pipeline
-                torch.cuda.empty_cache()
+            del pipeline
+            torch.cuda.empty_cache()
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()

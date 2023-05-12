@@ -37,14 +37,13 @@ def retrieve(class_prompt, class_data_dir, num_class_images):
         class_images = client.query(text=class_prompt)
         if len(class_images) >= factor * num_class_images or num_images > 1e4:
             break
-        else:
-            num_images = int(factor * num_images)
-            client = ClipClient(
-                url="https://knn.laion.ai/knn-service",
-                indice_name="laion_400m",
-                num_images=num_images,
-                aesthetic_weight=0.1,
-            )
+        num_images = int(factor * num_images)
+        client = ClipClient(
+            url="https://knn.laion.ai/knn-service",
+            indice_name="laion_400m",
+            num_images=num_images,
+            aesthetic_weight=0.1,
+        )
 
     count = 0
     total = 0
